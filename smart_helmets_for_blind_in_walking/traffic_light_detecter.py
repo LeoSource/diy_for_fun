@@ -5,7 +5,7 @@ import cv2
 model = YOLO("yolov8n.pt")
 
 # 2. 加载图片
-image_path = "data/7.jpg"  # 你的图片路径
+image_path = "data/9.jpg"  # 你的图片路径
 image = cv2.imread(image_path)
 
 # 3. 推理检测
