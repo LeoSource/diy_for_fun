@@ -5,24 +5,25 @@ from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 import akshare as ak
-import yfinance as yf
-import matplotlib.pyplot as plt
 import mplfinance as mpf
 from tenacity import retry, stop_after_attempt, wait_fixed
+import matplotlib.pyplot as plt
 
+plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams['axes.unicode_minus'] = False
 
 # ============ 配置 =============
 # 你要查的指数／现货名称 → 一些可能的代码（优先用 AkShare 接口支持的那些）
 index_candidates = {
     "上证50": ["000016"],
-    "沪深300": ["000300"],
+    "沪深300": ["399300"],
     "中证500": ["000905"],
     "中证1000": ["000852"],
     "中证2000": ["932000"],
     "科创50": ["000688"],
     "创业板指": ["399006"],
     "微盘股": ["883418"],
-    # 港股 / 黄金 /现货
+    # 港股 / 黄金 /现货 (保留但暂不处理)
     # "恒生指数": ["HSI", "^HSI"],
     # "恒生科技": ["HS2083"],
     # "恒生国企": ["HSCEL", "HSCE", "^HSCE"],
@@ -76,58 +77,37 @@ def normalize_df(df):
 def fetch_akshare_a_index(symbol):
     """用 AkShare 获取 A 股 /中证/上证 指数历史日线数据"""
     try:
-        df = ak.stock_zh_a_hist(symbol=symbol, period="daily",
-                                 start_date=start_date_str, end_date=end_date_str,adjust='')
+        df = ak.stock_zh_a_hist_em(symbol=symbol, period="daily",
+                                 start_date=start_date_str, end_date=end_date_str, adjust="qfq")
         if df is None or df.empty:
             return None, "no data from akshare index_zh_a_hist"
-        df2 = normalize_df(df)
-        return df2, ""
+        # 重命名列以适应 mplfinance
+        df.rename(columns={
+            '日期': 'Date',
+            '开盘': 'Open',
+            '最高': 'High',
+            '最低': 'Low',
+            '收盘': 'Close',
+            '成交量': 'Volume'
+        }, inplace=True)
+        # 设置日期为索引
+        df['Date'] = pd.to_datetime(df['Date'])
+        df.set_index('Date', inplace=True)
+        return df[['Open', 'High', 'Low', 'Close', 'Volume']], ""
     except Exception as e:
         return None, f"akshare index_zh_a_hist error: {e}"
 
-def fetch_akshare_spot_gold(symbol):
-    """用 AkShare 的现货黄金接口尝试获取数据（如上海金）"""
-    try:
-        # symbol 如 "Au99.99" 或其他
-        df = ak.spot_quotations_sge(symbol=symbol)
-        if df is None or df.empty:
-            return None, "no data from spot_quotations_sge"
-        # 其返回通常为实时样式，不是历史日线；但我们至少可以取最新价
-        df2 = normalize_df(df)
-        return df2, ""
-    except Exception as e:
-        return None, f"akshare spot_quotations_sge error: {e}"
-
-def fetch_yfinance(symbol):
-    """回退方式：yfinance 获取历史日线数据"""
-    try:
-        t = yf.Ticker(symbol)
-        hist = t.history(start=start_date.strftime("%Y-%m-%d"),
-                         end=(today + timedelta(days=1)).strftime("%Y-%m-%d"),
-                         interval="1d", auto_adjust=False)
-        if hist is None or hist.shape[0] == 0:
-            return None, "yfinance no data"
-        hist2 = hist.reset_index()
-        df2 = normalize_df(hist2)
-        return df2, ""
-    except Exception as e:
-        return None, f"yfinance error: {e}"
-
-def try_candidates(cands):
-    """按候选顺序尝试 AkShare / AkGold / yfinance 等方式，返回 (df, which_method, used_symbol, note)"""
+def try_candidates(cands, name):
+    """按候选顺序尝试 AkShare 方式，返回 (df, which_method, used_symbol, note)"""
     for sym in cands:
-        # 尝试 A 股 / 中证指数方式（适用于纯数字符号）
-        df, note = fetch_akshare_a_index(sym)
-        if df is not None:
-            return df, "ak_a_index", sym, note
-        # 尝试黄金现货接口
-        # df, note2 = fetch_akshare_spot_gold(sym)
-        # if df is not None:
-        #     return df, "ak_gold_spot", sym, note2
-        # # 尝试 yfinance
-        # df, note3 = fetch_yfinance(sym)
-        # if df is not None:
-        #     return df, "yfinance", sym, note3
+        # 判断是否为A股指数代码（纯数字）
+        if sym.isdigit() or (len(sym) == 6 and sym[:2] in ['00', '30', '60', '88', '93']):
+            df, note = fetch_akshare_a_index(sym)
+            if df is not None:
+                return df, "ak_a_index", sym, note
+        else:
+            # 对于非A股指数，暂时跳过不处理
+            return None, None, None, f"Skipping non-A share index: {name}"
     # 全部尝试失败
     return None, None, None, "all candidates failed"
 
@@ -136,9 +116,9 @@ def try_candidates(cands):
 rows = []
 for name, cands in index_candidates.items():
     print(f"Processing {name} ...")
-    df, method, used_sym, note = try_candidates(cands)
+    df, method, used_sym, note = try_candidates(cands, name)
     if df is None:
-        print(f"  ❌ {name} 获取失败，note = {note}")
+        print(f"  ❌ {name} 获取失败或跳过，note = {note}")
         rows.append({
             "指数": name,
             "used_symbol": None,
@@ -152,16 +132,19 @@ for name, cands in index_candidates.items():
         })
         continue
 
+    # 提取收盘价用于计算指标
+    close_prices = df['Close'].copy()
+    
     # 计算 MA20
-    df["MA20"] = df["close"].rolling(window=20).mean()
+    ma20_series = close_prices.rolling(window=20).mean()
 
-    last = df["close"].iloc[-1]
-    ma20 = df["MA20"].iloc[-1] if not np.isnan(df["MA20"].iloc[-1]) else np.nan
-    date = df["date"].iloc[-1]
+    last = close_prices.iloc[-1]
+    ma20 = ma20_series.iloc[-1] if not np.isnan(ma20_series.iloc[-1]) else np.nan
+    date = close_prices.index[-1].date()
 
     # 当日涨跌幅
-    if len(df) >= 2:
-        prev = df["close"].iloc[-2]
+    if len(close_prices) >= 2:
+        prev = close_prices.iloc[-2]
         if prev != 0:
             chg_pct = 100 * (last - prev) / prev
         else:
@@ -183,23 +166,39 @@ for name, cands in index_candidates.items():
         "note": note
     })
 
-    # 绘图
+    # 使用 mplfinance 绘制更漂亮的K线图，每个指数只画一张图
     try:
-        plt.figure(figsize=(8,4))
-        plt.rcParams['font.sans-serif'] = ['SimHei']
-        plt.rcParams['axes.unicode_minus'] = False
-        plt.plot(df["date"], df["close"], label="收盘价")
-        if "MA20" in df.columns:
-            plt.plot(df["date"], df["MA20"], label="20日均线", linestyle="--")
-        plt.title(f"{name} ({used_sym}, via {method})")
-        plt.xlabel("日期")
-        plt.ylabel("价格 / 指数")
-        plt.legend()
-        plt.grid(True, linestyle="--", alpha=0.5)
+        # 设置图表样式（红涨绿跌）
+        mc = mpf.make_marketcolors(
+            up='red',       # 上涨为红色
+            down='green',   # 下跌为绿色
+            edge='inherit',
+            wick={'up':'red','down':'green'},
+            volume='in'
+        )
+        
+        s = mpf.make_mpf_style(marketcolors=mc, gridstyle='-', y_on_right=True,  rc={'font.family': 'SimHei'})
+        
+        # 生成安全的文件名
         safe = "".join(ch if ch.isalnum() else "_" for ch in name)
-        plt.tight_layout()
-        plt.savefig(os.path.join(PLOT_DIR, f"{safe}_{used_sym}.png"), dpi=150)
-        plt.close()
+        
+        # 添加MA20到图表
+        ap = mpf.make_addplot(ma20_series, color='orange', width=1.5)
+        
+        # 绘制带MA20的蜡烛图并保存，解决中文显示问题
+        mpf.plot(
+            df,
+            type='candle',
+            style=s,
+            title=f"{name} ({used_sym})",
+            ylabel='Price (CNY)',
+            volume=True,
+            ylabel_lower='Volume',
+            figsize=(12, 8),
+            addplot=ap,
+            savefig=dict(fname=os.path.join(PLOT_DIR, f"{safe}_{used_sym}_candle.png"), dpi=150),
+        )
+        
     except Exception as e:
         print("  ⚠️ 绘图失败:", e)
 

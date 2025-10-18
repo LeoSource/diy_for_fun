@@ -157,7 +157,7 @@ if __name__ == "__main__":
     # 测试时候在此处正确填写相关信息即可运行
     wsParam = Ws_Param(APPID='a4cc4052', APISecret='YmJlY2RmNjQwNDNkZGY1NzNhZDVhZTkw',
                        APIKey='1213e4a91a830e86f2e3dbaecfc0ee93',
-                       Text="这是一个语音合成示例")
+                       Text="2025年10月16日，智元机器人发布的工业级交互式具身作业机器人精灵G2，凭借英伟达Thor芯片加持的算力优势、遥操作驱动的数据体系及多场景适配能力，成为具身智能商业化落地的标杆产品。本文从性能参数（包括价格）、技术架构、数据机制与市场潜力四维度解析其要点。")
     websocket.enableTrace(False)
     wsUrl = wsParam.create_url()
     ws = websocket.WebSocketApp(wsUrl, on_message=on_message, on_error=on_error, on_close=on_close)
